@@ -36,7 +36,7 @@
       };
 
       var onDidReceiveMessage = function(e) {
-        if (e.data.id === frameHash) {
+        if (e.data?.id?.length > 0 && e.data.id === frameHash) {
           var xhr = new XMLHttpRequest(),
               now = new Date(),
               data = {
@@ -118,9 +118,11 @@
   <body>
   </body>
   <script>
-    postToParent({
-      id: window.frameHash,
-      message: 'loaded'
-    });
+    if (this.window != this.parent.window) {
+      postToParent({
+        id: window.frameHash,
+        message: 'loaded'
+      });
+    }
   </script>
 </html>
