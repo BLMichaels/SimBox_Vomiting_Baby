@@ -11,6 +11,7 @@
   var STORAGE_COMPLETED = "simbox.completed";
   var STORAGE_EXITED = "simbox.exited";
   var STORAGE_STARTED_AT = "simbox.startedAtMs";
+  var lastSlide = { id: "", title: "", step: 0, seen: 0 };
 
   function cfg() {
     var c = window.SIMBOX_TRACKING_CONFIG || {};
@@ -127,24 +128,57 @@
     return sec;
   }
 
-  function buildPayload(eventType) {
+  function clip(value, max) {
+    var s = String(value || "");
+    if (s.length <= max) return s;
+    return s.slice(0, max);
+  }
+
+  function rememberSlide(info) {
+    if (!info) return;
+    var id = clip(info.slideId || info.id || "", 40);
+    var title = clip(info.slideTitle || info.title || "", 64);
+    var step = info.step;
+    if (id && id !== lastSlide.id) lastSlide.seen += 1;
+    if (id) lastSlide.id = id;
+    if (title) lastSlide.title = title;
+    if (typeof step === "number" && isFinite(step)) lastSlide.step = step;
+  }
+
+  function buildPayload(eventType, extra) {
+    extra = extra || {};
+    rememberSlide(extra);
     var c = cfg();
     var sid = sessionId();
     var env = c.environment;
     if (/[?&]simbox_env=test(?:&|$)/.test(window.location.search || "")) {
       env = "test";
     }
+    var meta = { environment: env };
+    if (typeof extra.step === "number" && isFinite(extra.step)) meta.step = extra.step;
+    else if (lastSlide.step) meta.step = lastSlide.step;
+    if (extra.slideId || lastSlide.id) meta.slideId = clip(extra.slideId || lastSlide.id, 40);
+    if (extra.slideTitle || lastSlide.title) meta.slideTitle = clip(extra.slideTitle || lastSlide.title, 64);
+    if (eventType === "case_exited") {
+      if (lastSlide.title) meta.lastSlide = lastSlide.title;
+      if (lastSlide.step) meta.lastStep = lastSlide.step;
+      if (lastSlide.seen) meta.slidesSeen = lastSlide.seen;
+    }
+    var eventKey = sid + ":" + eventType;
+    if (eventType === "case_checkpoint" && meta.slideId) {
+      eventKey = sid + ":cp:" + meta.slideId;
+    }
     return {
       event_type: eventType,
       case_key: c.caseKey,
       session_id: sid,
-      event_key: sid + ":" + eventType,
+      event_key: eventKey,
       occurred_at: new Date().toISOString(),
       elapsed_seconds: eventType === "case_started" ? 0 : elapsedSeconds(),
       delivery_context: deliveryContext(),
       device_type: deviceType(),
       app_version: c.appVersion,
-      metadata: { environment: env }
+      metadata: meta
     };
   }
 
@@ -201,33 +235,52 @@
     attempt(1);
   }
 
-  function start() {
+  function start(info) {
     try {
+      rememberSlide(info);
       if (getFlag(STORAGE_STARTED) === "1") {
         log("start ignored (already started)");
         return;
       }
       setFlag(STORAGE_STARTED, "1");
       setFlag(STORAGE_STARTED_AT, String(Date.now()));
-      send(buildPayload("case_started"), false);
+      send(buildPayload("case_started", info || {}), false);
     } catch (e) {
       log("start error ignored");
     }
   }
 
-  function complete() {
+  function complete(info) {
     try {
+      rememberSlide(info);
       if (getFlag(STORAGE_COMPLETED) === "1") {
         log("complete ignored (already completed)");
         return;
       }
       if (getFlag(STORAGE_STARTED) !== "1") {
-        start();
+        start(info);
       }
       setFlag(STORAGE_COMPLETED, "1");
-      send(buildPayload("case_completed"), false);
+      send(buildPayload("case_completed", info || {}), false);
     } catch (e) {
       log("complete error ignored");
+    }
+  }
+
+  function checkpoint(info) {
+    try {
+      rememberSlide(info);
+      var slideId = clip((info && (info.slideId || info.id)) || lastSlide.id, 40);
+      if (!slideId) return;
+      var flag = "simbox.cp." + slideId;
+      if (getFlag(flag) === "1") return;
+      if (getFlag(STORAGE_STARTED) !== "1") {
+        start(info);
+      }
+      setFlag(flag, "1");
+      send(buildPayload("case_checkpoint", info || {}), false);
+    } catch (e) {
+      log("checkpoint error ignored");
     }
   }
 
@@ -246,7 +299,7 @@
         return;
       }
       setFlag(STORAGE_EXITED, "1");
-      send(buildPayload("case_exited"), true);
+      send(buildPayload("case_exited", {}), true);
     } catch (e) {
       log("exit error ignored");
     }
@@ -265,6 +318,7 @@
   window.SimBoxTracking = {
     start: start,
     complete: complete,
+    checkpoint: checkpoint,
     exit: exit
   };
 

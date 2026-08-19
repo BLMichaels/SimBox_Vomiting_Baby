@@ -8,12 +8,37 @@
   function cfg() {
     var c = window.SIMBOX_TRACKING_CONFIG || {};
     var q = window.location.search || "";
+    var steps = [].concat(c.steps || []);
+    var startIds = [].concat(c.startSlideIds || []);
+    var completeIds = [].concat(c.completeSlideIds || []);
+    var startTitles = [].concat(c.startSlideTitles || []).map(lower);
+    var completeTitles = [].concat(c.completeSlideTitles || []).map(lower);
+    var minStep = Infinity;
+    var maxStep = -Infinity;
+    var i;
+    for (i = 0; i < steps.length; i++) {
+      var n = Number(steps[i].step);
+      if (!isFinite(n)) continue;
+      if (n < minStep) minStep = n;
+      if (n > maxStep) maxStep = n;
+    }
+    for (i = 0; i < steps.length; i++) {
+      var st = steps[i];
+      var n2 = Number(st.step);
+      if (st.id && n2 === minStep) startIds.push(st.id);
+      if (st.id && n2 === maxStep) completeIds.push(st.id);
+      if (st.title && n2 === minStep) startTitles.push(lower(st.title));
+      if (st.title && n2 === maxStep) completeTitles.push(lower(st.title));
+    }
     return {
       debug: c.debug === true || /[?&]simbox_debug=1(?:&|$)/.test(q),
-      startIds: [].concat(c.startSlideIds || []),
-      completeIds: [].concat(c.completeSlideIds || []),
-      startTitles: [].concat(c.startSlideTitles || []).map(lower),
-      completeTitles: [].concat(c.completeSlideTitles || []).map(lower)
+      steps: steps,
+      startIds: startIds,
+      completeIds: completeIds,
+      startTitles: startTitles,
+      completeTitles: completeTitles,
+      minStep: minStep,
+      maxStep: maxStep
     };
   }
 
@@ -36,6 +61,14 @@
     return parts.length ? parts[parts.length - 1] : s;
   }
 
+  function titleMatches(t, needle) {
+    if (!needle) return false;
+    if (t === needle) return true;
+    if (t.indexOf(needle + "-") === 0) return true;
+    if (t.indexOf(needle + " ") === 0) return true;
+    return false;
+  }
+
   function matches(id, title, ids, titles) {
     var i;
     var nid = String(id || "");
@@ -47,9 +80,21 @@
       if (shortId && shortId.indexOf(ids[i]) !== -1) return true;
     }
     for (i = 0; i < titles.length; i++) {
-      if (titles[i] && t.indexOf(titles[i]) !== -1) return true;
+      if (titleMatches(t, titles[i])) return true;
     }
     return false;
+  }
+
+  function findStep(slide) {
+    var steps = cfg().steps;
+    var i;
+    for (i = 0; i < steps.length; i++) {
+      var st = steps[i];
+      if (matches(slide.id, slide.title, st.id ? [st.id] : [], st.title ? [lower(st.title)] : [])) {
+        return st;
+      }
+    }
+    return null;
   }
 
   var lastNavId = "";
@@ -254,15 +299,29 @@
       debug("slide", slide);
       lastKey = key;
     }
+    var st = findStep(slide);
+    var info = {
+      slideId: (st && st.id) || slide.id,
+      slideTitle: (st && st.title) || slide.title,
+      step: st ? Number(st.step) : undefined
+    };
     if (!started && matches(slide.id, slide.title, c.startIds, c.startTitles)) {
       started = true;
       debug("start");
-      window.SimBoxTracking.start();
+      window.SimBoxTracking.start(info);
+    }
+    if (
+      st &&
+      window.SimBoxTracking.checkpoint &&
+      Number(st.step) !== c.minStep &&
+      Number(st.step) !== c.maxStep
+    ) {
+      window.SimBoxTracking.checkpoint(info);
     }
     if (!completed && matches(slide.id, slide.title, c.completeIds, c.completeTitles)) {
       completed = true;
       debug("complete");
-      window.SimBoxTracking.complete();
+      window.SimBoxTracking.complete(info);
     }
   }
 
