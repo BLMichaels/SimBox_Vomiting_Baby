@@ -22,7 +22,8 @@
       appVersion: String(c.appVersion || "1.0.0"),
       debug: c.debug === true || debugQs,
       autoStartOnLoad: c.autoStartOnLoad === true,
-      environment: String(c.environment || "production")
+      environment: String(c.environment || "production"),
+      siteKey: String(c.siteKey || "")
     };
   }
 
@@ -128,6 +129,24 @@
     return sec;
   }
 
+  function queryParam(name) {
+    try {
+      var search = window.location.search || "";
+      var re = new RegExp("[?&]" + name + "=([^&]*)");
+      var m = re.exec(search);
+      return m ? decodeURIComponent(m[1].replace(/\+/g, " ")) : "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function siteCode() {
+    var raw = queryParam("simbox_site") || cfg().siteKey;
+    var s = String(raw || "");
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(s)) return "";
+    return s;
+  }
+
   function clip(value, max) {
     var s = String(value || "");
     if (s.length <= max) return s;
@@ -155,6 +174,8 @@
       env = "test";
     }
     var meta = { environment: env };
+    var site = siteCode();
+    if (site) meta.siteKey = site;
     if (typeof extra.step === "number" && isFinite(extra.step)) meta.step = extra.step;
     else if (lastSlide.step) meta.step = lastSlide.step;
     if (extra.slideId || lastSlide.id) meta.slideId = clip(extra.slideId || lastSlide.id, 40);
