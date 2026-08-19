@@ -14,11 +14,12 @@
 
   function cfg() {
     var c = window.SIMBOX_TRACKING_CONFIG || {};
+    var debugQs = /[?&]simbox_debug=1(?:&|$)/.test(window.location.search || "");
     return {
       caseKey: String(c.caseKey || ""),
       endpointUrl: String(c.endpointUrl || ""),
       appVersion: String(c.appVersion || "1.0.0"),
-      debug: c.debug === true,
+      debug: c.debug === true || debugQs,
       autoStartOnLoad: c.autoStartOnLoad === true,
       environment: String(c.environment || "production")
     };
@@ -164,22 +165,40 @@
         log("beacon failed, falling back to fetch");
       }
     }
-    try {
-      fetch(url, {
+    function postOnce() {
+      return fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: body,
         keepalive: true,
         mode: "cors",
         credentials: "omit"
-      }).then(function (res) {
-        log("fetch", payload.event_type, res.status);
-      }).catch(function (err) {
-        log("fetch failed (ignored)", String(err));
       });
-    } catch (e) {
-      log("send failed (ignored)");
     }
+    function attempt(n) {
+      try {
+        postOnce()
+          .then(function (res) {
+            log("fetch", payload.event_type, res.status);
+            if (!res.ok && n < 3) {
+              window.setTimeout(function () {
+                attempt(n + 1);
+              }, 400 * n);
+            }
+          })
+          .catch(function (err) {
+            log("fetch failed (retrying)", String(err));
+            if (n < 3) {
+              window.setTimeout(function () {
+                attempt(n + 1);
+              }, 400 * n);
+            }
+          });
+      } catch (e) {
+        log("send failed (ignored)");
+      }
+    }
+    attempt(1);
   }
 
   function start() {
