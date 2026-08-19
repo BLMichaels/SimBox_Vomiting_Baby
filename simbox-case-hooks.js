@@ -1,15 +1,15 @@
-/* SimBox slide hooks — load AFTER simbox-tracking.js.
-   Storyline’s currentSlideId player variable is empty unless authors set it.
-   This file watches slide JS loads, the DOM, and DS player state instead.
+/* SimBox slide hooks — load AFTER simbox-tracking.js, BEFORE bootstrapper.
+   Storyline does not fill currentSlideId. Watch the player’s own slide
+   navigation, asset URLs, and same-origin iframes instead.
 */
 (function () {
   "use strict";
 
   function cfg() {
     var c = window.SIMBOX_TRACKING_CONFIG || {};
-    var debugQs = /[?&]simbox_debug=1(?:&|$)/.test(window.location.search || "");
+    var q = window.location.search || "";
     return {
-      debug: c.debug === true || debugQs,
+      debug: c.debug === true || /[?&]simbox_debug=1(?:&|$)/.test(q),
       startIds: [].concat(c.startSlideIds || []),
       completeIds: [].concat(c.completeSlideIds || []),
       startTitles: [].concat(c.startSlideTitles || []).map(lower),
@@ -28,12 +28,23 @@
     if (console && console.log) console.log.apply(console, args);
   }
 
+  function idFrom(value) {
+    var s = String(value || "");
+    var m = s.match(/([56][A-Za-z0-9]{6,})(?:\.js)?(?:$|[^A-Za-z0-9])/);
+    if (m) return m[1];
+    var parts = s.split(".");
+    return parts.length ? parts[parts.length - 1] : s;
+  }
+
   function matches(id, title, ids, titles) {
     var i;
     var nid = String(id || "");
+    var shortId = idFrom(nid);
     var t = lower(title);
     for (i = 0; i < ids.length; i++) {
-      if (ids[i] && nid.indexOf(ids[i]) !== -1) return true;
+      if (!ids[i]) continue;
+      if (nid.indexOf(ids[i]) !== -1) return true;
+      if (shortId && shortId.indexOf(ids[i]) !== -1) return true;
     }
     for (i = 0; i < titles.length; i++) {
       if (titles[i] && t.indexOf(titles[i]) !== -1) return true;
@@ -41,12 +52,78 @@
     return false;
   }
 
-  var lastScriptSlideId = "";
+  var lastNavId = "";
+  var lastTitle = "";
 
   function noteSrc(src) {
-    var m = String(src || "").match(/html5\/data\/js\/([56][A-Za-z0-9]+)\.js/i);
-    if (m) lastScriptSlideId = m[1];
+    if (src == null) return;
+    var s = src;
+    if (typeof src !== "string") {
+      try {
+        s = src.url || src.href || String(src);
+      } catch (e) {
+        return;
+      }
+    }
+    s = String(s);
+    if (s.indexOf(".js") === -1 && s.indexOf("/html5/data/js") === -1) return;
+    var sid = idFrom(s);
+    if (sid && /^[56][A-Za-z0-9]{6,}$/.test(sid)) {
+      lastNavId = sid;
+    }
   }
+
+  function wrapNetwork(win) {
+    if (!win || win.__simboxNetWrapped) return;
+    try {
+      win.__simboxNetWrapped = true;
+    } catch (e0) {
+      return;
+    }
+    try {
+      if (typeof win.fetch === "function") {
+        var origFetch = win.fetch;
+        win.fetch = function (input) {
+          try {
+            noteSrc(input);
+          } catch (e1) {}
+          return origFetch.apply(this, arguments);
+        };
+      }
+    } catch (e2) {}
+    try {
+      var XO = win.XMLHttpRequest;
+      if (XO && XO.prototype && !XO.prototype.__simboxOpen) {
+        var origOpen = XO.prototype.open;
+        XO.prototype.open = function (method, url) {
+          try {
+            noteSrc(url);
+          } catch (e3) {}
+          return origOpen.apply(this, arguments);
+        };
+        XO.prototype.__simboxOpen = true;
+      }
+    } catch (e4) {}
+  }
+
+  wrapNetwork(window);
+
+  try {
+    var proto = window.HTMLScriptElement && HTMLScriptElement.prototype;
+    var desc = proto && Object.getOwnPropertyDescriptor(proto, "src");
+    if (desc && desc.set && desc.get) {
+      Object.defineProperty(proto, "src", {
+        configurable: true,
+        get: function () {
+          return desc.get.call(this);
+        },
+        set: function (v) {
+          noteSrc(v);
+          return desc.set.call(this, v);
+        }
+      });
+    }
+  } catch (e5) {}
 
   try {
     var po = new PerformanceObserver(function (list) {
@@ -54,126 +131,118 @@
       var i;
       for (i = 0; i < entries.length; i++) noteSrc(entries[i].name);
     });
-    po.observe({ type: "resource" });
-  } catch (e0) {}
+    try {
+      po.observe({ type: "resource" });
+    } catch (e6) {
+      po.observe({ entryTypes: ["resource"] });
+    }
+  } catch (e7) {}
 
-  if (document.querySelectorAll) {
-    var existing = document.querySelectorAll("script[src]");
-    var si;
-    for (si = 0; si < existing.length; si++) noteSrc(existing[si].src);
+  function playerWindows() {
+    var list = [window];
+    try {
+      var frames = document.getElementsByTagName("iframe");
+      var i;
+      for (i = 0; i < frames.length; i++) {
+        try {
+          if (frames[i].contentWindow) list.push(frames[i].contentWindow);
+        } catch (e8) {}
+      }
+    } catch (e9) {}
+    return list;
   }
 
-  try {
-    var observer = new MutationObserver(function (muts) {
-      var m, n, j;
-      for (m = 0; m < muts.length; m++) {
-        var nodes = muts[m].addedNodes;
-        if (!nodes) continue;
-        for (n = 0; n < nodes.length; n++) {
-          var node = nodes[n];
-          if (!node) continue;
-          if (node.tagName === "SCRIPT") noteSrc(node.src);
-          if (node.querySelectorAll) {
-            var inner = node.querySelectorAll("script[src]");
-            for (j = 0; j < inner.length; j++) noteSrc(inner[j].src);
+  function slideFromModel(slide) {
+    if (!slide) return { id: "", title: "" };
+    var id = "";
+    var title = "";
+    try {
+      id = slide.absoluteId || slide.id || "";
+      if (typeof slide.get === "function") {
+        id = id || slide.get("id") || slide.get("slideid") || "";
+        title = slide.get("title") || "";
+      } else {
+        title = slide.title || "";
+      }
+    } catch (e10) {}
+    return { id: String(id || ""), title: String(title || "") };
+  }
+
+  function fromStoryline(win) {
+    var empty = { id: "", title: "" };
+    try {
+      var DS = win.DS;
+      if (!DS) return empty;
+      if (DS.frame) {
+        var wins = DS.frame.windows;
+        if (wins && wins.length) {
+          var w;
+          for (var i = 0; i < wins.length; i++) {
+            w = wins[i];
+            if (w && typeof w.getCurrentSlide === "function") {
+              var got = slideFromModel(w.getCurrentSlide());
+              if (got.id || got.title) return got;
+            }
           }
         }
       }
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-  } catch (e1) {}
-
-  function fromPlayerVars() {
-    var id = "";
-    var title = "";
-    try {
-      if (typeof GetPlayer !== "function") return { id: id, title: title };
-      var player = GetPlayer();
-      if (!player || typeof player.GetVar !== "function") return { id: id, title: title };
-      var names = [
-        "currentSlideId",
-        "Project.SlideTitle",
-        "Slide.Title",
-        "Menu.SlideTitle"
-      ];
-      var i;
-      for (i = 0; i < names.length; i++) {
-        var v = player.GetVar(names[i]);
-        if (v == null || v === "") continue;
-        var s = String(v);
-        if (names[i].toLowerCase().indexOf("title") !== -1) title = title || s;
-        else id = id || s;
+      if (DS.presentation && typeof DS.presentation.slideMap === "function") {
+        var sm = DS.presentation.slideMap();
+        if (sm && !sm.__simboxHooked && typeof sm.setCurrentSlide === "function") {
+          var orig = sm.setCurrentSlide;
+          sm.setCurrentSlide = function (id) {
+            lastNavId = String(id || lastNavId);
+            debug("setCurrentSlide", lastNavId);
+            var result = orig.apply(this, arguments);
+            tick();
+            return result;
+          };
+          sm.__simboxHooked = true;
+          debug("hooked slideMap.setCurrentSlide");
+        }
+        if (sm && typeof sm.getCurrentSlide === "function") {
+          var cur = slideFromModel(sm.getCurrentSlide());
+          if (cur.id || cur.title) return cur;
+        }
       }
-    } catch (e2) {}
-    return { id: id, title: title };
+    } catch (e11) {}
+    return empty;
   }
 
-  function walkForSlide(obj, depth, seen) {
-    if (!obj || depth > 5 || typeof obj !== "object") return null;
-    if (seen.indexOf(obj) !== -1) return null;
-    seen.push(obj);
+  function fromGetPlayer(win) {
     try {
-      var title = obj.title || obj.slideTitle || "";
-      var sid = obj.id || obj.slideid || obj.slideId || "";
-      if (title && sid && typeof title === "string" && typeof sid === "string") {
-        if (/^[56][A-Za-z0-9]+$/.test(sid) && title.length < 80) {
-          return { id: sid, title: title };
-        }
-      }
-      if (obj.currentSlide && typeof obj.currentSlide === "object") {
-        var nested = walkForSlide(obj.currentSlide, depth + 1, seen);
-        if (nested) return nested;
-        var cs = obj.currentSlide;
-        if (typeof cs.get === "function") {
-          var gid = cs.get("id") || cs.get("slideid") || "";
-          var gtitle = cs.get("title") || "";
-          if (gid || gtitle) return { id: String(gid || ""), title: String(gtitle || "") };
-        }
-      }
-      var keys = ["state", "pub", "presentation", "player", "store"];
-      var k;
-      for (k = 0; k < keys.length; k++) {
-        if (obj[keys[k]]) {
-          var found = walkForSlide(obj[keys[k]], depth + 1, seen);
-          if (found) return found;
-        }
-      }
-    } catch (e3) {}
-    return null;
-  }
-
-  function fromDom() {
-    var id = "";
-    var title = "";
-    try {
-      var labeled = document.querySelector("[data-acc-text], .slide-title, .cs-slide-title");
-      if (labeled) title = String(labeled.getAttribute("data-acc-text") || labeled.textContent || "").trim();
-      var withId = document.querySelector("[data-slide-id], [data-model-id]");
-      if (withId) {
-        id = String(withId.getAttribute("data-slide-id") || withId.getAttribute("data-model-id") || "");
-      }
-    } catch (e4) {}
-    return { id: id, title: title };
+      if (typeof win.GetPlayer !== "function") return { id: "", title: "" };
+      var player = win.GetPlayer();
+      if (!player || typeof player.GetVar !== "function") return { id: "", title: "" };
+      return {
+        id: String(player.GetVar("currentSlideId") || ""),
+        title: String(player.GetVar("Project.SlideTitle") || player.GetVar("Slide.Title") || "")
+      };
+    } catch (e12) {
+      return { id: "", title: "" };
+    }
   }
 
   function readSlide() {
-    var a = fromPlayerVars();
-    var b = { id: "", title: "" };
-    try {
-      if (window.DS) {
-        var walked = walkForSlide(window.DS, 0, []);
-        if (walked) b = walked;
-      }
-    } catch (e5) {}
-    var c = fromDom();
-    var id = a.id || b.id || c.id || lastScriptSlideId;
-    var title = a.title || b.title || c.title || "";
-    return { id: id, title: title };
+    var wins = playerWindows();
+    var i;
+    var best = { id: lastNavId, title: lastTitle };
+    for (i = 0; i < wins.length; i++) {
+      wrapNetwork(wins[i]);
+      var a = fromStoryline(wins[i]);
+      var b = fromGetPlayer(wins[i]);
+      if (a.id) best.id = a.id;
+      if (a.title) best.title = a.title;
+      if (b.id) best.id = best.id || b.id;
+      if (b.title) best.title = best.title || b.title;
+    }
+    lastTitle = best.title || lastTitle;
+    return best;
   }
 
-  var lastKey = "";
   var started = false;
   var completed = false;
+  var lastKey = "";
 
   function tick() {
     if (!window.SimBoxTracking) return;
@@ -198,12 +267,12 @@
   }
 
   var intervalId = window.setInterval(tick, 250);
+  window.setTimeout(tick, 200);
   if (document.addEventListener) {
     document.addEventListener("visibilitychange", function () {
       if (document.visibilityState === "visible") tick();
     });
   }
-  window.setTimeout(tick, 300);
 
   window.SimBoxCaseHooks = {
     stop: function () {
